@@ -151,9 +151,8 @@ def _parse_text_tool_calls(content: str) -> list:
     Returns a list of dicts: [{"name": str, "args": dict}, ...]
     """
     results = []
-    # Pattern matches: <function=TOOL_NAME{"key": "value"}></function>
-    # or: <function=TOOL_NAME{"key": "value", "key2": "value2"}></function>
-    pattern = r"<function=(\w+)(\{.*?\})></function>"
+    # Groq/llama emits: <function=TOOL_NAME>{"key": "value"}</function>
+    pattern = r"<function=(\w+)>(.*?)</function>"
     for match in re.finditer(pattern, content, re.DOTALL):
         name = match.group(1)
         args_str = match.group(2)
@@ -213,7 +212,7 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
         # Clean the response content by stripping raw function call tags so the
         # summarization LLM isn't confused by XML-like syntax in its own history.
         cleaned_content = re.sub(
-            r"<function=\w+\{.*?\}></function>",
+            r"<function=\w+>.*?</function>",
             "",
             response.content,
             flags=re.DOTALL,
