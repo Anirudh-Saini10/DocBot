@@ -5,17 +5,16 @@ import logging
 from typing import Dict, Any
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from backend.drive_tool import search_drive
 
 logger = logging.getLogger(__name__)
 
-# Load .env from project root regardless of CWD
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(_env_path)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "")
 
 
@@ -116,22 +115,17 @@ Combined conditions:
 
 
 def get_agent():
-    """Build and return (llm_with_tools, plain_llm) for the two-step agent loop."""
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=GROQ_API_KEY,
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        google_api_key=GOOGLE_API_KEY,
         temperature=0.2,
     )
     llm_with_tools = llm.bind_tools([drive_search_tool])
-    # Plain LLM (no tools bound) is used for the summarization step so the
-    # model cannot loop back into another tool call and is forced to produce text.
     plain_llm = llm
     return llm_with_tools, plain_llm
 
 
 def _build_fallback_summary(tool_results: list) -> str:
-    """Construct a plain-text summary directly from raw tool results when the
-    LLM fails to produce one."""
     parts = []
     for tr in tool_results:
         result = tr.get("result", "")
@@ -143,15 +137,7 @@ def _build_fallback_summary(tool_results: list) -> str:
 
 
 def _parse_text_tool_calls(content: str) -> list:
-    """Fallback parser for text-based function calls when structured tool_calls fail.
-
-    Groq/llama sometimes emits raw XML-like tags instead of structured tool calls.
-    Example: <function=drive_search_tool{"query_string": "name contains 'report'"}></function>
-
-    Returns a list of dicts: [{"name": str, "args": dict}, ...]
-    """
     results = []
-    # Groq/llama emits: <function=TOOL_NAME>{"key": "value"}</function>
     pattern = r"<function=(\w+)>(.*?)</function>"
     for match in re.finditer(pattern, content, re.DOTALL):
         name = match.group(1)
@@ -166,10 +152,6 @@ def _parse_text_tool_calls(content: str) -> list:
 
 
 def run_agent(user_message: str, conversation_history: list = None) -> Dict[str, Any]:
-    """
-    Run the agent on a user message.
-    conversation_history is a list of dicts: {"role": "user"|"assistant", "content": str}
-    """
     from langchain_core.messages import ToolMessage
 
     if conversation_history is None:
@@ -192,14 +174,12 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
     response = llm_with_tools.invoke(messages)
     logger.debug("Initial LLM response — content: %r  tool_calls: %s", response.content, response.tool_calls)
 
-    # Check for structured tool calls OR text-based fallback
     tool_calls = list(response.tool_calls) if response.tool_calls else []
     if not tool_calls:
         tool_calls = _parse_text_tool_calls(response.content)
         if tool_calls:
             logger.info("Falling back to text-based tool call parsing. Found %d call(s).", len(tool_calls))
 
-    # If the LLM decided to call a tool
     if tool_calls:
         tool_results = []
         for tc in tool_calls:
@@ -209,8 +189,6 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
                 logger.debug("drive_search_tool result: %r", result)
                 tool_results.append({"tool_call_id": tc.get("id", "fallback"), "result": result})
 
-        # Clean the response content by stripping raw function call tags so the
-        # summarization LLM isn't confused by XML-like syntax in its own history.
         cleaned_content = re.sub(
             r"<function=\w+>.*?</function>",
             "",
@@ -222,22 +200,16 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
         else:
             response.content = "I searched your Google Drive."
 
-        # Append the assistant's tool-call turn and each tool result so the
-        # plain LLM has full context for its summary.
         messages.append(response)
         for tr in tool_results:
             messages.append(ToolMessage(content=tr["result"], tool_call_id=tr["tool_call_id"]))
 
-        # Use the plain LLM (no tools bound) so the model is forced to return
-        # a text summary rather than attempting another tool call.
         logger.debug("Invoking plain LLM for summarization step")
         final_response = plain_llm.invoke(messages)
         logger.debug("Final LLM response — content: %r", final_response.content)
 
         content = final_response.content
 
-        # Fallback: if the model still returned empty content, build the
-        # summary directly from the raw tool results.
         if not content or not content.strip():
             logger.warning("Final LLM response was empty — using fallback summary from tool results")
             content = _build_fallback_summary(tool_results)
