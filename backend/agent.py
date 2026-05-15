@@ -116,7 +116,7 @@ Combined conditions:
 
 def get_agent():
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-flash-latest",
         google_api_key=GOOGLE_API_KEY,
         temperature=0.2,
     )
@@ -172,6 +172,11 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
 
     logger.debug("Invoking LLM (with tools) for user message: %r", user_message)
     response = llm_with_tools.invoke(messages)
+    # Gemini sometimes returns content as a list; normalize to string
+    if isinstance(response.content, list):
+        response.content = "".join(str(part) for part in response.content)
+    elif response.content is None:
+        response.content = ""
     logger.debug("Initial LLM response — content: %r  tool_calls: %s", response.content, response.tool_calls)
 
     tool_calls = list(response.tool_calls) if response.tool_calls else []
@@ -206,6 +211,11 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
 
         logger.debug("Invoking plain LLM for summarization step")
         final_response = plain_llm.invoke(messages)
+        # Gemini sometimes returns content as a list; normalize to string
+        if isinstance(final_response.content, list):
+            final_response.content = "".join(str(part) for part in final_response.content)
+        elif final_response.content is None:
+            final_response.content = ""
         logger.debug("Final LLM response — content: %r", final_response.content)
 
         content = final_response.content
