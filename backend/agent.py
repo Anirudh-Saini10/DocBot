@@ -1,4 +1,6 @@
 import os
+import re
+import json
 import logging
 from typing import Dict, Any
 from dotenv import load_dotenv
@@ -140,6 +142,30 @@ def _build_fallback_summary(tool_results: list) -> str:
     return "I searched your Google Drive but couldn't find any files matching your request. Try rephrasing or using different keywords."
 
 
+def _parse_text_tool_calls(content: str) -> list:
+    """Fallback parser for text-based function calls when structured tool_calls fail.
+
+    Groq/llama sometimes emits raw XML-like tags instead of structured tool calls.
+    Example: <function=drive_search_tool{"query_string": "name contains 'report'"}></function>
+
+    Returns a list of dicts: [{"name": str, "args": dict}, ...]
+    """
+    results = []
+    # Pattern matches: <function=TOOL_NAME{"key": "value"}></function>
+    # or: <function=TOOL_NAME{"key": "value", "key2": "value2"}></function>
+    pattern = r"<function=(\w+)(\{.*?\})></function>"
+    for match in re.finditer(pattern, content, re.DOTALL):
+        name = match.group(1)
+        args_str = match.group(2)
+        try:
+            args = json.loads(args_str)
+            results.append({"name": name, "args": args})
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse tool args JSON: %s", args_str)
+            continue
+    return results
+
+
 def run_agent(user_message: str, conversation_history: list = None) -> Dict[str, Any]:
     """
     Run the agent on a user message.
@@ -167,15 +193,22 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
     response = llm_with_tools.invoke(messages)
     logger.debug("Initial LLM response — content: %r  tool_calls: %s", response.content, response.tool_calls)
 
+    # Check for structured tool calls OR text-based fallback
+    tool_calls = list(response.tool_calls) if response.tool_calls else []
+    if not tool_calls:
+        tool_calls = _parse_text_tool_calls(response.content)
+        if tool_calls:
+            logger.info("Falling back to text-based tool call parsing. Found %d call(s).", len(tool_calls))
+
     # If the LLM decided to call a tool
-    if response.tool_calls:
+    if tool_calls:
         tool_results = []
-        for tc in response.tool_calls:
+        for tc in tool_calls:
             if tc["name"] == "drive_search_tool":
                 logger.debug("Executing drive_search_tool with args: %s", tc["args"])
                 result = drive_search_tool.invoke(tc["args"])
                 logger.debug("drive_search_tool result: %r", result)
-                tool_results.append({"tool_call_id": tc["id"], "result": result})
+                tool_results.append({"tool_call_id": tc.get("id", "fallback"), "result": result})
 
         # Append the assistant's tool-call turn and each tool result so the
         # plain LLM has full context for its summary.
