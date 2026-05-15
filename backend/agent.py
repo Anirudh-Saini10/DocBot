@@ -1,10 +1,13 @@
 import os
+import logging
 from typing import Dict, Any
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_groq import ChatGroq
 from langchain_core.tools import tool
 from backend.drive_tool import search_drive
+
+logger = logging.getLogger(__name__)
 
 # Load .env from project root regardless of CWD
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
@@ -104,20 +107,37 @@ Combined conditions:
 - If the user wants a specific file type, map it to the correct mimeType string.
 - If the user refers to a date (e.g., "last week", "after May 1"), convert it to ISO 8601 format and use `modifiedTime > '...'`.
 - If the user wants text inside documents, use `fullText contains 'keyword'`.
-- Always be conversational. After receiving tool results, summarize them nicely for the user and provide the file links.
+- IMPORTANT: After receiving tool results, you MUST always respond with a plain-text conversational summary. Never call a tool again after receiving tool results — just summarize what was found and include the file links.
+- If no files were found, tell the user clearly and suggest they try a different search.
 - If the query is ambiguous, ask a clarifying question instead of guessing.
 """
 
 
 def get_agent():
-    """Build and return the LangChain agent with tool calling."""
+    """Build and return (llm_with_tools, plain_llm) for the two-step agent loop."""
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=GROQ_API_KEY,
         temperature=0.2,
     )
     llm_with_tools = llm.bind_tools([drive_search_tool])
-    return llm_with_tools
+    # Plain LLM (no tools bound) is used for the summarization step so the
+    # model cannot loop back into another tool call and is forced to produce text.
+    plain_llm = llm
+    return llm_with_tools, plain_llm
+
+
+def _build_fallback_summary(tool_results: list) -> str:
+    """Construct a plain-text summary directly from raw tool results when the
+    LLM fails to produce one."""
+    parts = []
+    for tr in tool_results:
+        result = tr.get("result", "")
+        if result and result != "No files found matching your criteria.":
+            parts.append(result)
+    if parts:
+        return "Here are the files I found in your Drive:\n\n" + "\n".join(parts)
+    return "I searched your Google Drive but couldn't find any files matching your request. Try rephrasing or using different keywords."
 
 
 def run_agent(user_message: str, conversation_history: list = None) -> Dict[str, Any]:
@@ -125,10 +145,12 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
     Run the agent on a user message.
     conversation_history is a list of dicts: {"role": "user"|"assistant", "content": str}
     """
+    from langchain_core.messages import ToolMessage
+
     if conversation_history is None:
         conversation_history = []
 
-    agent = get_agent()
+    llm_with_tools, plain_llm = get_agent()
 
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
     for turn in conversation_history:
@@ -141,26 +163,43 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
 
     messages.append(HumanMessage(content=user_message))
 
-    response = agent.invoke(messages)
+    logger.debug("Invoking LLM (with tools) for user message: %r", user_message)
+    response = llm_with_tools.invoke(messages)
+    logger.debug("Initial LLM response — content: %r  tool_calls: %s", response.content, response.tool_calls)
 
     # If the LLM decided to call a tool
     if response.tool_calls:
         tool_results = []
         for tc in response.tool_calls:
             if tc["name"] == "drive_search_tool":
+                logger.debug("Executing drive_search_tool with args: %s", tc["args"])
                 result = drive_search_tool.invoke(tc["args"])
+                logger.debug("drive_search_tool result: %r", result)
                 tool_results.append({"tool_call_id": tc["id"], "result": result})
 
-        # Append tool results back to conversation for the LLM to summarize
+        # Append the assistant's tool-call turn and each tool result so the
+        # plain LLM has full context for its summary.
         messages.append(response)
         for tr in tool_results:
-            from langchain_core.messages import ToolMessage
             messages.append(ToolMessage(content=tr["result"], tool_call_id=tr["tool_call_id"]))
 
-        final_response = agent.invoke(messages)
+        # Use the plain LLM (no tools bound) so the model is forced to return
+        # a text summary rather than attempting another tool call.
+        logger.debug("Invoking plain LLM for summarization step")
+        final_response = plain_llm.invoke(messages)
+        logger.debug("Final LLM response — content: %r", final_response.content)
+
+        content = final_response.content
+
+        # Fallback: if the model still returned empty content, build the
+        # summary directly from the raw tool results.
+        if not content or not content.strip():
+            logger.warning("Final LLM response was empty — using fallback summary from tool results")
+            content = _build_fallback_summary(tool_results)
+
         return {
             "role": "assistant",
-            "content": final_response.content,
+            "content": content,
             "tool_calls": tool_results,
         }
 
