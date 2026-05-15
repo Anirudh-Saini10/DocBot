@@ -15,7 +15,13 @@ def get_drive_service():
 
     # Accept either raw JSON string or a file path
     if creds_info.strip().startswith("{"):
-        info = json.loads(creds_info)
+        try:
+            info = json.loads(creds_info)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"GOOGLE_SERVICE_ACCOUNT_JSON is malformed JSON: {e}. "
+                "Make sure it uses double quotes (not single quotes) and is minified to one line."
+            ) from e
     else:
         with open(creds_info, "r", encoding="utf-8") as f:
             info = json.load(f)
