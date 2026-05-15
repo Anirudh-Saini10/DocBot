@@ -210,6 +210,19 @@ def run_agent(user_message: str, conversation_history: list = None) -> Dict[str,
                 logger.debug("drive_search_tool result: %r", result)
                 tool_results.append({"tool_call_id": tc.get("id", "fallback"), "result": result})
 
+        # Clean the response content by stripping raw function call tags so the
+        # summarization LLM isn't confused by XML-like syntax in its own history.
+        cleaned_content = re.sub(
+            r"<function=\w+\{.*?\}></function>",
+            "",
+            response.content,
+            flags=re.DOTALL,
+        ).strip()
+        if cleaned_content:
+            response.content = cleaned_content
+        else:
+            response.content = "I searched your Google Drive."
+
         # Append the assistant's tool-call turn and each tool result so the
         # plain LLM has full context for its summary.
         messages.append(response)
