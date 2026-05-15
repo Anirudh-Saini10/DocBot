@@ -215,7 +215,7 @@ if not st.session_state.messages:
     example_prompts = [
         "Find my project proposal PDF",
         "Show spreadsheets from last week",
-        "Search for bounceup documents",
+        "Search for quarterly report documents",
     ]
     for i, col in enumerate(cols):
         with col:
