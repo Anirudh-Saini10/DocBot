@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="TailorTalk API", version="1.0.0")
+app = FastAPI(title="DocBot API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,

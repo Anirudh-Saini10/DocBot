@@ -1,4 +1,4 @@
-# TailorTalk
+# DocBot
 
 A conversational AI agent for discovering files in Google Drive.
 

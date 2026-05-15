@@ -4,9 +4,9 @@ import httpx
 
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
-st.set_page_config(page_title="TailorTalk", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="DocBot", page_icon="🤖", layout="centered")
 
-st.title("🤖 TailorTalk")
+st.title("🤖 DocBot")
 st.caption("Ask me to find files in your Google Drive!")
 
 # Initialize chat history in session state
